@@ -1,0 +1,67 @@
+name: Block multiple release/hotfix branches
+
+on:
+  create:        # 새 브랜치가 생성될 때
+  push:          # 일부 클라이언트는 push로 브랜치 생성 -> 보조 트리거
+    branches:
+      - 'release/**'
+      - 'hotfix/**'
+
+permissions:
+  contents: write   # 브랜치(ref) 삭제에 필요
+
+jobs:
+  guard:
+    if: >
+      (github.event_name == 'create' && github.event.ref_type == 'branch' &&
+       (startsWith(github.event.ref, 'release/') || startsWith(github.event.ref, 'hotfix/'))) ||
+      (github.event_name == 'push' && github.event.created == true &&
+       (startsWith(github.ref_name, 'release/') || startsWith(github.ref_name, 'hotfix/')))
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve current ref
+        id: ctx
+        run: |
+          if [ "${{ github.event_name }}" = "create" ]; then
+            REF_NAME="${{ github.event.ref }}"
+          else
+            REF_NAME="${{ github.ref_name }}"
+          fi
+          echo "ref_name=$REF_NAME" >> $GITHUB_OUTPUT
+          echo "full_ref=refs/heads/$REF_NAME" >> $GITHUB_OUTPUT
+          echo "ref_path=heads/$REF_NAME" >> $GITHUB_OUTPUT
+
+      - name: Check existing release/hotfix branches
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.BOT_GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          repo="${{ github.repository }}"
+          current="${{ steps.ctx.outputs.full_ref }}"
+
+          rel=$(gh api -H "Accept: application/vnd.github+json" \
+               /repos/$repo/git/matching-refs/heads/release | jq -r '.[].ref')
+          hot=$(gh api -H "Accept: application/vnd.github+json" \
+               /repos/$repo/git/matching-refs/heads/hotfix  | jq -r '.[].ref')
+
+          count=$( (printf "%s\n%s\n" "$rel" "$hot" \
+            | grep -E '^refs/heads/(release/|hotfix/)' \
+            | grep -v -x "$current" || true) | wc -l | tr -d ' ')
+          echo "count=$count" >> $GITHUB_OUTPUT
+
+      - name: Block creation (delete branch & fail)
+        if: steps.check.outputs.count != '0'
+        env:
+          GH_TOKEN: ${{ secrets.BOT_GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          repo="${{ github.repository }}"
+          ref_path="${{ steps.ctx.outputs.ref_path }}"
+          echo "::error::Only one of release/* or hotfix/* may exist at a time. Deleting '${{ steps.ctx.outputs.ref_name }}'."
+          gh api -X DELETE "/repos/$repo/git/refs/$ref_path"
+          exit 1
+
+      - name: Allowed
+        if: steps.check.outputs.count == '0'
+        run: echo "No other release/hotfix branches exist. '${{ steps.ctx.outputs.ref_name }}' allowed."
